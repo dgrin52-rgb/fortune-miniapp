@@ -1,0 +1,554 @@
+// src/pages/GamePage.js
+import React, { useMemo, useState, useEffect } from "react";
+
+function getInitData() {
+  return window.Telegram?.WebApp?.initData || "";
+}
+
+const API_BASE = process.env.REACT_APP_API_BASE || "";
+
+// Призы - порядок по часовой стрелке от верхнего сектора (12 часов)
+const prizes = [
+  { id: 1, text: "бесплатное сопровождение 1 неделю", short: "10%" },
+  { id: 2, text: "бесплатную консультацю", short: "консультация" },
+  { id: 3, text: "скидку 10%", short: "сопровождение" },
+  { id: 4, text: "бесплатную статистику по боту", short: "статистика" }
+];
+
+// Фон колеса под N секторов (ровные сектора)
+function wheelBackground(n) {
+  const step = 360 / n;
+  const stops = [];
+  for (let i = 0; i < n; i++) {
+    const a0 = i * step;
+    const a1 = (i + 1) * step;
+    const c = i % 2 === 0 ? "#2b0045" : "#1c0031";
+    stops.push(`${c} ${a0}deg ${a1}deg`);
+  }
+  // from 0deg: начинаем с верхней точки (12 часов)
+  return `conic-gradient(from 0deg, ${stops.join(", ")})`;
+}
+
+// Лейблы - текст всегда читается правильно
+function labelTransform(i, n) {
+  const step = 360 / n;
+  const angle = i * step + step / 2; // угол от вертикали
+  const r = 110; // радиус размещения текста
+  
+  // Поворачиваем текст так, чтобы он всегда был читаемым
+  const textRotation = (angle > 90 && angle < 270) ? 180 : 0;
+  
+  return `translate(-50%, -50%) rotate(${angle}deg) translate(${r}px) rotate(${textRotation}deg)`;
+}
+
+// Функция для определения приза по углу поворота колеса
+// Кончик стрелки всегда указывает на центр сектора, никогда на грань
+function getPrizeFromAngle(angle, n) {
+  // Приводим угол к диапазону 0-360
+  let normalizedAngle = angle % 360;
+  if (normalizedAngle < 0) normalizedAngle += 360;
+  
+  const step = 360 / n;
+  
+  // Добавляем небольшое смещение (0.1 градуса) чтобы избежать попадания на грань
+  // Кончик стрелки всегда будет указывать на сектор, никогда на границу между секторами
+  const safeAngle = normalizedAngle + 0.1;
+  
+  // Определяем сектор, на который указывает стрелка (верхняя точка - 0 градусов)
+  const sectorIndex = Math.floor(safeAngle / step) % n;
+  
+  return prizes[sectorIndex];
+}
+
+// Функция для расчета безопасного угла остановки (никогда не на грани)
+function calculateSafeTarget(randomSector, step) {
+  // Центр сектора
+  const centerAngle = randomSector * step + step / 2;
+  
+  // Добавляем небольшое случайное смещение в пределах сектора,
+  // но гарантированно не на границе (от центра -step/4 до центра +step/4)
+  const maxOffset = step / 4; // Не больше четверти сектора от центра
+  const randomOffset = (Math.random() * 2 - 1) * maxOffset;
+  
+  // Финальный угол в пределах сектора, но гарантированно не на границе
+  const finalAngle = centerAngle + randomOffset;
+  
+  // 6 полных оборотов + безопасный угол
+  return 360 * 6 + finalAngle;
+}
+
+export default function GamePage() {
+  const [spinning, setSpinning] = useState(false);
+  const [prize, setPrize] = useState(null);
+  const [deg, setDeg] = useState(0);
+  const [showConfetti, setShowConfetti] = useState(false);
+
+  const [name, setName] = useState("");
+  const [tg, setTg] = useState("");
+  const [phone, setPhone] = useState("");
+  const [sending, setSending] = useState(false);
+
+  const title = useMemo(
+    () => (prize ? prize.text : "Крути и забирай приз"),
+    [prize]
+  );
+
+  // Эффект для определения приза после остановки колеса
+  useEffect(() => {
+    if (!spinning && deg !== 0) {
+      const currentPrize = getPrizeFromAngle(deg, prizes.length);
+      setPrize(currentPrize);
+      setShowConfetti(true);
+      
+      // Скрываем конфетти через 3 секунды
+      setTimeout(() => setShowConfetti(false), 3000);
+      
+      console.log("Стрелка показывает на:", currentPrize);
+      console.log("Точный угол:", deg % 360);
+    }
+  }, [spinning, deg]);
+
+  function spin() {
+    if (spinning) return;
+    setSpinning(true);
+    setPrize(null);
+    setShowConfetti(false);
+
+    const n = prizes.length;
+    // Случайный сектор
+    const randomSector = Math.floor(Math.random() * n);
+    
+    const step = 360 / n;
+    // Рассчитываем безопасный угол остановки (никогда не на грани)
+    const target = calculateSafeTarget(randomSector, step);
+    
+    setDeg((prev) => prev + target);
+
+    setTimeout(() => {
+      setSpinning(false);
+    }, 2600);
+  }
+
+  function validateForm() {
+    const tgOk = tg.trim().length >= 3;
+    const phoneOk = phone.trim().length >= 6;
+    return tgOk || phoneOk;
+  }
+
+  async function submit() {
+    if (!prize) return;
+
+    if (!validateForm()) {
+      alert("Укажи ник в TG или телефон, иначе мы тебя не найдём 🙂");
+      return;
+    }
+
+    const payload = {
+      prize: prize.text,
+      name: name.trim(),
+      tg: tg.trim(),
+      phone: phone.trim(),
+      initData: getInitData(),
+    };
+
+    setSending(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/visa-spin/claim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        alert("Не улетело. Проверь сервер/токен.");
+        return;
+      }
+
+      alert("Заявка улетела. Жди ответ 💜");
+
+      setName("");
+      setTg("");
+      setPhone("");
+    } catch (e) {
+      alert("Ошибка сети/сервера. Проверь API_BASE и backend.");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div style={styles.page}>
+      {showConfetti && (
+        <div style={styles.confetti}>
+          🎉 🎉 🎉
+        </div>
+      )}
+      
+      <div style={styles.wrapper}>
+        <h1 style={styles.title}>КОЛЕСО ФОРТУНЫ</h1>
+
+        <div style={styles.text}>
+          <div style={{ opacity: 0.85 }}>
+            Крути и забирай призы
+          </div>
+        </div>
+
+        <div style={styles.stage}>
+          {/* Стрелка сверху, кончиком вниз, начало на границе колеса */}
+          <div style={styles.pointerContainer}>
+            <div style={styles.pointer} />
+            {/* Острие стрелки (маленькая точка для точности) */}
+            <div style={styles.pointerTip} />
+          </div>
+
+          <div
+            style={{
+              ...styles.wheel,
+              background: wheelBackground(prizes.length),
+              transform: `rotate(${deg}deg)`,
+              transition: spinning
+                ? "transform 2.6s cubic-bezier(.12,.78,.12,1)"
+                : "none",
+            }}
+          >
+            {/* Грани */}
+            {prizes.map((p, i) => {
+              const angle = i * (360 / prizes.length);
+              return (
+                <div
+                  key={`line-${p.id}`}
+                  style={{
+                    ...styles.divider,
+                    transform: `translateY(-50%) rotate(${angle}deg)`,
+                  }}
+                />
+              );
+            })}
+
+            {/* Лейблы */}
+            {prizes.map((p, i) => (
+              <div
+                key={`label-${p.id}`}
+                style={{
+                  ...styles.label,
+                  transform: labelTransform(i, prizes.length),
+                }}
+              >
+                {p.short}
+              </div>
+            ))}
+
+            {/* Блик */}
+            <div style={styles.gloss} />
+
+            {/* Центр */}
+            <div style={styles.hub} />
+          </div>
+        </div>
+
+        <button style={styles.btn} onClick={spin} disabled={spinning}>
+          {spinning ? "Крутим..." : "ГАЗ"}
+        </button>
+
+        <div style={styles.result}>
+          <div style={{ fontSize: 18, marginTop: 16 }}>{title}</div>
+
+          {prize && (
+            <div style={{ opacity: 0.88, marginTop: 6 }}>
+              🎁 Красава, ты выиграл {prize.text} 🎁
+            </div>
+          )}
+        </div>
+
+        {prize && (
+          <div style={styles.form}>
+            <div style={styles.formTitle}>Забрать приз</div>
+
+            <input
+              style={styles.input}
+              placeholder="Имя"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+
+            <input
+              style={styles.input}
+              placeholder="Ник в TG (например, @username)"
+              value={tg}
+              onChange={(e) => setTg(e.target.value)}
+            />
+
+            <input
+              style={styles.input}
+              placeholder="Телефон"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+            />
+
+            <button style={styles.btn2} onClick={submit} disabled={sending}>
+              {sending ? "Отправляем..." : "Отправить"}
+            </button>
+
+            <div style={styles.hint}>
+              Достаточно ника в TG или телефона.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const WHEEL_SIZE = 320;
+const RADIUS = WHEEL_SIZE / 2;
+
+const styles = {
+  page: {
+    minHeight: "calc(100dvh - 70px)",
+    background:
+      "radial-gradient(circle at 50% 10%, #24003a 0%, #0b0014 55%, #000 100%)",
+    padding: "24px 16px",
+    color: "white",
+    fontFamily: "system-ui, -apple-system, sans-serif",
+    position: "relative",
+  },
+  
+  confetti: {
+    position: "fixed",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    fontSize: 48,
+    zIndex: 1000,
+    pointerEvents: "none",
+    animation: "confetti 3s ease-out",
+  },
+
+  wrapper: { 
+    maxWidth: 900, 
+    margin: "0 auto", 
+    textAlign: "center" 
+  },
+
+  title: {
+    fontSize: "clamp(28px, 5vw, 48px)",
+    color: "#c0c0c0",
+    textShadow: "0 0 16px rgba(123,44,255,0.65)",
+    margin: "10px 0 10px",
+    letterSpacing: 1,
+  },
+
+  text: { 
+    opacity: 0.92, 
+    marginBottom: 10 
+  },
+
+  stage: {
+    position: "relative",
+    width: WHEEL_SIZE + 20,
+    height: WHEEL_SIZE + 20,
+    margin: "18px auto 10px",
+  },
+
+  pointerContainer: {
+    position: "absolute",
+    top: +20,
+    left: "50%",
+    transform: "translateX(-50%)",
+    width: 30,
+    height: 40,
+    zIndex: 20,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+  },
+
+  pointer: {
+    width: 0,
+    height: 0,
+    borderLeft: "14px solid transparent",
+    borderRight: "14px solid transparent",
+    borderTop: "26px solid #c0c0c0",
+    filter: "drop-shadow(0 0 10px rgba(192,192,192,0.55))",
+  },
+
+  pointerTip: {
+    width: 4,
+    height: 4,
+    borderRadius: "50%",
+    background: "#7b2cff",
+    position: "absolute",
+    bottom: -2,
+    left: "50%",
+    transform: "translateX(-50%)",
+    boxShadow: "0 0 10px #ff0",
+  },
+
+  wheel: {
+    width: WHEEL_SIZE,
+    height: WHEEL_SIZE,
+    borderRadius: "50%",
+    border: "8px solid #7b2cff",
+    boxShadow: "0 0 28px rgba(123,44,255,0.4)",
+    position: "absolute",
+    top: 10,
+    left: 10,
+    overflow: "hidden",
+  },
+
+  divider: {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    width: RADIUS,
+    height: 2,
+    background: "rgba(255,255,255,0.18)",
+    transformOrigin: "0% 50%",
+    pointerEvents: "none",
+  },
+
+  label: {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    fontSize: 12,
+    fontWeight: 600,
+    color: "#ffffff",
+    textShadow: "0 0 8px rgba(0,0,0,0.8)",
+    whiteSpace: "nowrap",
+    padding: "4px 8px",
+    background: "rgba(123,44,255,0.3)",
+    borderRadius: "12px",
+    border: "1px solid rgba(123,44,255,0.6)",
+    backdropFilter: "blur(2px)",
+    letterSpacing: 0.3,
+    pointerEvents: "none",
+    zIndex: 5,
+  },
+
+  gloss: {
+    position: "absolute",
+    inset: 0,
+    borderRadius: "50%",
+    background:
+      "radial-gradient(circle at 30% 25%, rgba(255,255,255,0.20) 0%, rgba(255,255,255,0) 45%), radial-gradient(circle at 70% 75%, rgba(123,44,255,0.12) 0%, rgba(123,44,255,0) 55%)",
+    pointerEvents: "none",
+  },
+
+  hub: {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    width: 74,
+    height: 74,
+    transform: "translate(-50%, -50%)",
+    borderRadius: "50%",
+    background:
+      "radial-gradient(circle at 30% 30%, #d7d7d7 0%, #6b6b6b 45%, #2a2a2a 100%)",
+    boxShadow:
+      "0 0 18px rgba(0,0,0,0.6), inset 0 0 10px rgba(255,255,255,0.15)",
+    border: "2px solid rgba(255,255,255,0.15)",
+    zIndex: 10,
+  },
+
+  btn: {
+    background: "#7b2cff",
+    color: "white",
+    border: "none",
+    padding: "14px 42px",
+    fontSize: 18,
+    fontWeight: 600,
+    borderRadius: 14,
+    cursor: "pointer",
+    marginTop: 10,
+    boxShadow: "0 0 18px rgba(123,44,255,0.35)",
+    transition: "all 0.2s ease",
+    ":hover": {
+      background: "#8f4aff",
+      transform: "scale(1.02)",
+    },
+    ":disabled": {
+      opacity: 0.5,
+      cursor: "not-allowed",
+    }
+  },
+
+  btn2: {
+    background: "#7b2cff",
+    color: "white",
+    border: "none",
+    padding: "12px 24px",
+    fontSize: 16,
+    fontWeight: 600,
+    borderRadius: 12,
+    cursor: "pointer",
+    marginTop: 10,
+    width: 260,
+    boxShadow: "0 0 18px rgba(123,44,255,0.25)",
+    transition: "all 0.2s ease",
+    ":hover": {
+      background: "#8f4aff",
+    },
+    ":disabled": {
+      opacity: 0.5,
+      cursor: "not-allowed",
+    }
+  },
+
+  result: { 
+    minHeight: 60 
+  },
+
+  form: {
+    marginTop: 16,
+    padding: 14,
+    border: "1px solid rgba(123,44,255,0.5)",
+    borderRadius: 14,
+    background: "rgba(10,0,20,0.35)",
+    backdropFilter: "blur(6px)",
+  },
+
+  formTitle: { 
+    fontSize: 18, 
+    marginBottom: 10 
+  },
+
+  input: {
+    width: 260,
+    padding: 10,
+    borderRadius: 10,
+    border: "1px solid #3b0061",
+    background: "#0b0014",
+    color: "white",
+    margin: "6px auto",
+    display: "block",
+    outline: "none",
+    fontSize: 14,
+    "::placeholder": {
+      color: "#666",
+    }
+  },
+
+  hint: {
+    marginTop: 10,
+    fontSize: 12,
+    opacity: 0.75,
+  },
+};
+
+// Добавляем анимацию в глобальный стиль (можно добавить в index.css)
+const globalStyles = `
+  @keyframes confetti {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(0); }
+    20% { opacity: 1; transform: translate(-50%, -50%) scale(1.2); }
+    80% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%, -50%) scale(0); }
+  }
+`;
+
+// Добавляем стили в head (если нет глобального CSS)
+if (typeof document !== 'undefined') {
+  const style = document.createElement('style');
+  style.textContent = globalStyles;
+  document.head.appendChild(style);
+}
